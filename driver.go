@@ -24,6 +24,7 @@ type vol struct {
 	MountPoint string `json:"mountpoint"`
 	Type       string `json:"type"`
 	Source     string `json:"source"`
+	KeyFile    string `json:"keyfile"`
 }
 
 func newDriver(home, vgConfig string) (*lvmDriver, error) {
@@ -54,11 +55,17 @@ func (l *lvmDriver) Create(req volume.Request) volume.Response {
 		return resp(err)
 	}
 
+	keyFile, ok := req.Options["keyfile"]
+	hasKeyFile := ok && keyFile != ""
+
 	cmdArgs := []string{"-n", req.Name, "--setactivationskip", "n"}
 	snap, ok := req.Options["snapshot"]
 	isSnapshot := ok && snap != ""
 	isThinSnap := false
 	if isSnapshot {
+		if hasKeyFile {
+			return resp(fmt.Errorf("Please don't specify --opt keyfile= for snapshots"))
+		}
 		if isThinSnap, err = isThinlyProvisioned(vgName, snap); err != nil {
 			l.logger.Err(fmt.Sprintf("Create: lvdisplayGrep error: %s", err))
 			return resp(fmt.Errorf("Error creating volume"))
@@ -72,7 +79,7 @@ func (l *lvmDriver) Create(req volume.Request) volume.Response {
 	}
 
 	if hasSize && isThinSnap {
-		return resp(fmt.Errorf("Please don't specify --size for thin snapshots"))
+		return resp(fmt.Errorf("Please don't specify --opt size= for thin snapshots"))
 	}
 
 	if isSnapshot {
@@ -102,11 +109,40 @@ func (l *lvmDriver) Create(req volume.Request) volume.Response {
 	}()
 
 	if !isSnapshot {
-		cmd = exec.Command("mkfs.xfs", fmt.Sprintf("/dev/%s/%s", vgName, req.Name))
-		out, err := cmd.CombinedOutput()
-		if err != nil {
+		lvDevice := fmt.Sprintf("/dev/%s/%s", vgName, req.Name)
+		fsDevice := lvDevice
+		if hasKeyFile {
+			if _, err := os.Stat(keyFile); os.IsNotExist(err) {
+				return resp(fmt.Errorf("key file does not exist: %s", keyFile))
+			}
+
+			cmd = exec.Command("cryptsetup", "-q", "-d", keyFile, "luksFormat", lvDevice)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				l.logger.Err(fmt.Sprintf("Create: cryptsetup error: %s output %s", err, string(out)))
+				return resp(fmt.Errorf("Error encrypting volume"))
+			}
+
+			cmd = exec.Command("cryptsetup", "-d", keyFile, "luksOpen", lvDevice, fmt.Sprintf("luks-%s", req.Name))
+			if out, err := cmd.CombinedOutput(); err != nil {
+				l.logger.Err(fmt.Sprintf("Create: cryptsetup error: %s output %s", err, string(out)))
+				return resp(fmt.Errorf("Error opening encrypted volume"))
+			}
+
+			fsDevice = fmt.Sprintf("/dev/mapper/luks-%s", req.Name)
+		}
+
+		cmd = exec.Command("mkfs.xfs", fsDevice)
+		if out, err := cmd.CombinedOutput(); err != nil {
 			l.logger.Err(fmt.Sprintf("Create: mkfs.xfs error: %s output %s", err, string(out)))
 			return resp(fmt.Errorf("Error partitioning volume"))
+		}
+
+		if hasKeyFile {
+			cmd = exec.Command("cryptsetup", "luksClose", fmt.Sprintf("luks-%s", req.Name))
+			if out, err := cmd.CombinedOutput(); err != nil {
+				l.logger.Err(fmt.Sprintf("Create: cryptsetup error: %s output %s", err, string(out)))
+				return resp(fmt.Errorf("Error closing encrypted volume"))
+			}
 		}
 	}
 
@@ -123,8 +159,13 @@ func (l *lvmDriver) Create(req volume.Request) volume.Response {
 
 	v := &vol{Name: req.Name, MountPoint: mp}
 	if isSnapshot {
+		source := l.volumes[snap]
 		v.Type = "Snapshot"
 		v.Source = snap
+		v.KeyFile = source.KeyFile
+	}
+	if hasKeyFile {
+		v.KeyFile = keyFile
 	}
 	l.volumes[v.Name] = v
 	l.count[v.Name] = 0
@@ -220,17 +261,32 @@ func (l *lvmDriver) Mount(req volume.MountRequest) volume.Response {
 		return resp(err)
 	}
 
+	v, exists := l.volumes[req.Name]
+	if !exists {
+		return resp(fmt.Errorf("No such volume"))
+	}
+
 	isSnap := func() bool {
-		if v, ok := l.volumes[req.Name]; ok {
-			if v.Type == "Snapshot" {
-				return true
-			}
+		if v.Type == "Snapshot" {
+			return true
 		}
 		return false
 	}()
 
 	if l.count[req.Name] == 1 {
-		mountArgs := []string{fmt.Sprintf("/dev/%s/%s", vgName, req.Name), getMountpoint(l.home, req.Name)}
+		lvDevice := fmt.Sprintf("/dev/%s/%s", vgName, req.Name)
+		fsDevice := lvDevice
+
+		if v.KeyFile != null {
+			cmd := exec.Command("cryptsetup", "-d", v.KeyFile, "luksOpen", lvDevice, fmt.Sprintf("luks-%s", req.Name))
+			if out, err := cmd.CombinedOutput(); err != nil {
+				l.logger.Err(fmt.Sprintf("Mount: cryptsetup error: %s output %s", err, string(out)))
+				return resp(fmt.Errorf("Error opening encrypted volume"))
+			}
+			fsDevice = fmt.Sprintf("/dev/mapper/luks-%s", req.Name)
+		}
+
+		mountArgs := []string{fsDevice, getMountpoint(l.home, req.Name)}
 		if isSnap {
 			mountArgs = append([]string{"-o", "nouuid"}, mountArgs...)
 		}
@@ -255,6 +311,17 @@ func (l *lvmDriver) Unmount(req volume.UnmountRequest) volume.Response {
 		if out, err := cmd.CombinedOutput(); err != nil {
 			l.logger.Err(fmt.Sprintf("Unmount: unmount error: %s output %s", err, string(out)))
 			return resp(fmt.Errorf("error unmounting volume"))
+		}
+		v, exists := l.volumes[req.Name]
+		if !exists {
+			return resp(fmt.Errorf("No such volume"))
+		}
+		if v.KeyFile != null {
+			cmd = exec.Command("cryptsetup", "luksClose", fmt.Sprintf("luks-%s", req.Name))
+			if out, err := cmd.CombinedOutput(); err != nil {
+				l.logger.Err(fmt.Sprintf("Unmount: cryptsetup error: %s output %s", err, string(out)))
+				return resp(fmt.Errorf("Error closing encrypted volume"))
+			}
 		}
 	}
 	if err := saveToDisk(l.volumes, l.count); err != nil {
