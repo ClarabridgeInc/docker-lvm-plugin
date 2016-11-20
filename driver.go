@@ -367,7 +367,7 @@ func resp(r interface{}) volume.Response {
 }
 
 func luksOpen(vgName, volName, keyFile string) ([]byte, error) {
-	cmd = exec.Command("cryptsetup", "-d", keyFile, "luksOpen", logicalDevice(vgName, volName), luksDeviceName(volName))
+	cmd := exec.Command("cryptsetup", "-d", keyFile, "luksOpen", logicalDevice(vgName, volName), luksDeviceName(volName))
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return out, err
 	}
@@ -375,7 +375,7 @@ func luksOpen(vgName, volName, keyFile string) ([]byte, error) {
 }
 
 func luksClose(volName string) ([]byte, error) {
-	cmd = exec.Command("cryptsetup", "luksClose", luksDeviceName(volName))
+	cmd := exec.Command("cryptsetup", "luksClose", luksDeviceName(volName))
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return out, err
 	}
