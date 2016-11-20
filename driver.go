@@ -270,11 +270,14 @@ func (l *lvmDriver) Mount(req volume.MountRequest) volume.Response {
 		return resp(err)
 	}
 
-	isSnap, keyFile := func() (bool, bool) {
+	isSnap, keyFile := func() (bool, string) {
 		if v, ok := l.volumes[req.Name]; ok {
-			return v.Type == "Snapshot", v.KeyFile
+			if v.Type == "Snapshot" {
+				return true, v.KeyFile
+			}
+			return false, v.KeyFile
 		}
-		return false, false
+		return false, ""
 	}()
 
 	if l.count[req.Name] == 1 {
