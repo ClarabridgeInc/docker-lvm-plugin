@@ -58,10 +58,10 @@ func (l *lvmDriver) Create(req volume.Request) volume.Response {
 	keyFile, ok := req.Options["keyfile"]
 	hasKeyFile := ok && keyFile != ""
 	if hasKeyFile {
-		if err = keyFileExists(keyFile) && err != nil {
+		if err = keyFileExists(keyFile); err != nil {
 			return resp(err)
 		}
-		if err = cryptsetupInstalled() && err != nil {
+		if err = cryptsetupInstalled(); err != nil {
 			return resp(err)
 		}
 	}
