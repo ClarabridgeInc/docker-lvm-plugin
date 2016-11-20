@@ -58,10 +58,10 @@ func (l *lvmDriver) Create(req volume.Request) volume.Response {
 	keyFile, ok := req.Options["keyfile"]
 	hasKeyFile := ok && keyFile != ""
 	if hasKeyFile {
-		if err := keyFileExists(keyFile) && err != nil {
+		if err = keyFileExists(keyFile) && err != nil {
 			return resp(err)
 		}
-		if err := cryptsetupInstalled() && err != nil {
+		if err = cryptsetupInstalled() && err != nil {
 			return resp(err)
 		}
 	}
@@ -285,11 +285,11 @@ func (l *lvmDriver) Mount(req volume.MountRequest) volume.Response {
 
 		if keyFile != "" {
 			if err := keyFileExists(keyFile) && err != nil {
-				l.logger.Err(fmtSprintf("Mount: %s", err))
+				l.logger.Err(fmt.Sprintf("Mount: %s", err))
 				return resp(err)
 			}
 			if err := cryptsetupInstalled() && err != nil {
-				l.logger.Err(fmtSprintf("Mount: %s", err))
+				l.logger.Err(fmt.Sprintf("Mount: %s", err))
 				return resp(err)
 			}
 			if out, err := luksOpen(vgName, req.Name, keyFile); err != nil {
@@ -298,7 +298,7 @@ func (l *lvmDriver) Mount(req volume.MountRequest) volume.Response {
 			}
 			defer func() {
 				if err != nil {
-					if out, err = luksClose(req.Name); err != nil {
+					if out, err := luksClose(req.Name); err != nil {
 						l.logger.Err(fmt.Sprintf("Mount: cryptsetup error: %s output %s", err, string(out)))
 					}
 				}
