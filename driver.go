@@ -333,8 +333,8 @@ func (l *lvmDriver) Unmount(req volume.UnmountRequest) volume.Response {
 			return resp(fmt.Errorf("error unmounting volume"))
 		}
 		if v, ok := l.volumes[req.Name]; ok && v.KeyFile != "" {
-			if err := cryptsetupInstalled() {
-				l.logger.Err(fmtSprintf("Unmount: %s", err))
+			if err := cryptsetupInstalled(); err != nil {
+				l.logger.Err(fmt.Sprintf("Unmount: %s", err))
 				return resp(err)
 			}
 			if out, err := luksClose(req.Name); err != nil {
@@ -366,7 +366,7 @@ func resp(r interface{}) volume.Response {
 	}
 }
 
-func luksOpen(vgName, volName, keyFile string) ([]byte, error){
+func luksOpen(vgName, volName, keyFile string) ([]byte, error) {
 	cmd = exec.Command("cryptsetup", "-d", keyFile, "luksOpen", logicalDevice(vgName, volName), luksDeviceName(volName))
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return out, err
@@ -374,7 +374,7 @@ func luksOpen(vgName, volName, keyFile string) ([]byte, error){
 	return nil, nil
 }
 
-func luksClose(volName string) ([]byte, error){
+func luksClose(volName string) ([]byte, error) {
 	cmd = exec.Command("cryptsetup", "luksClose", luksDeviceName(volName))
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return out, err
