@@ -109,29 +109,28 @@ func (l *lvmDriver) Create(req volume.Request) volume.Response {
 	}()
 
 	if !isSnapshot {
-		lvDevice := fmt.Sprintf("/dev/%s/%s", vgName, req.Name)
-		fsDevice := lvDevice
+		device := fmt.Sprintf("/dev/%s/%s", vgName, req.Name)
 		if hasKeyFile {
 			if _, err := os.Stat(keyFile); os.IsNotExist(err) {
 				return resp(fmt.Errorf("key file does not exist: %s", keyFile))
 			}
 
-			cmd = exec.Command("cryptsetup", "-q", "-d", keyFile, "luksFormat", lvDevice)
+			cmd = exec.Command("cryptsetup", "-q", "-d", keyFile, "luksFormat", device)
 			if out, err := cmd.CombinedOutput(); err != nil {
 				l.logger.Err(fmt.Sprintf("Create: cryptsetup error: %s output %s", err, string(out)))
 				return resp(fmt.Errorf("Error encrypting volume"))
 			}
 
-			cmd = exec.Command("cryptsetup", "-d", keyFile, "luksOpen", lvDevice, fmt.Sprintf("luks-%s", req.Name))
+			cmd = exec.Command("cryptsetup", "-d", keyFile, "luksOpen", device, fmt.Sprintf("luks-%s", req.Name))
 			if out, err := cmd.CombinedOutput(); err != nil {
 				l.logger.Err(fmt.Sprintf("Create: cryptsetup error: %s output %s", err, string(out)))
 				return resp(fmt.Errorf("Error opening encrypted volume"))
 			}
 
-			fsDevice = fmt.Sprintf("/dev/mapper/luks-%s", req.Name)
+			device = fmt.Sprintf("/dev/mapper/luks-%s", req.Name)
 		}
 
-		cmd = exec.Command("mkfs.xfs", fsDevice)
+		cmd = exec.Command("mkfs.xfs", device)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			l.logger.Err(fmt.Sprintf("Create: mkfs.xfs error: %s output %s", err, string(out)))
 			return resp(fmt.Errorf("Error partitioning volume"))
