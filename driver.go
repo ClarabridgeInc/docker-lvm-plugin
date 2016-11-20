@@ -57,6 +57,14 @@ func (l *lvmDriver) Create(req volume.Request) volume.Response {
 
 	keyFile, ok := req.Options["keyfile"]
 	hasKeyFile := ok && keyFile != ""
+	if hasKeyFile {
+		if err := keyFileExists(keyFile) {
+			return resp(err)
+		}
+		if err := cryptsetupInstalled() {
+			return resp(err)
+		}
+	}
 
 	cmdArgs := []string{"-n", req.Name, "--setactivationskip", "n"}
 	snap, ok := req.Options["snapshot"]
@@ -109,25 +117,29 @@ func (l *lvmDriver) Create(req volume.Request) volume.Response {
 	}()
 
 	if !isSnapshot {
-		device := fmt.Sprintf("/dev/%s/%s", vgName, req.Name)
-		if hasKeyFile {
-			if _, err := os.Stat(keyFile); os.IsNotExist(err) {
-				return resp(fmt.Errorf("key file does not exist: %s", keyFile))
-			}
+		device := logicalDevice(vgName, req.Name)
 
+		if hasKeyFile {
 			cmd = exec.Command("cryptsetup", "-q", "-d", keyFile, "luksFormat", device)
 			if out, err := cmd.CombinedOutput(); err != nil {
 				l.logger.Err(fmt.Sprintf("Create: cryptsetup error: %s output %s", err, string(out)))
 				return resp(fmt.Errorf("Error encrypting volume"))
 			}
 
-			cmd = exec.Command("cryptsetup", "-d", keyFile, "luksOpen", device, fmt.Sprintf("luks-%s", req.Name))
-			if out, err := cmd.CombinedOutput(); err != nil {
+			if out, err := luksOpen(vgName, req.Name, keyFile); err != nil {
 				l.logger.Err(fmt.Sprintf("Create: cryptsetup error: %s output %s", err, string(out)))
 				return resp(fmt.Errorf("Error opening encrypted volume"))
 			}
 
-			device = fmt.Sprintf("/dev/mapper/luks-%s", req.Name)
+			defer func() {
+				if err != nil {
+					if out, err = luksClose(req.Name); err != nil {
+						l.logger.Err(fmt.Sprintf("Create: cryptsetup error: %s output %s", err, string(out)))
+					}
+				}
+			}()
+
+			device = luksDevice(req.Name)
 		}
 
 		cmd = exec.Command("mkfs.xfs", device)
@@ -137,8 +149,7 @@ func (l *lvmDriver) Create(req volume.Request) volume.Response {
 		}
 
 		if hasKeyFile {
-			cmd = exec.Command("cryptsetup", "luksClose", fmt.Sprintf("luks-%s", req.Name))
-			if out, err := cmd.CombinedOutput(); err != nil {
+			if out, err := luksClose(req.Name); err != nil {
 				l.logger.Err(fmt.Sprintf("Create: cryptsetup error: %s output %s", err, string(out)))
 				return resp(fmt.Errorf("Error closing encrypted volume"))
 			}
@@ -162,8 +173,7 @@ func (l *lvmDriver) Create(req volume.Request) volume.Response {
 		v.Type = "Snapshot"
 		v.Source = snap
 		v.KeyFile = source.KeyFile
-	}
-	if hasKeyFile {
+	} else if hasKeyFile {
 		v.KeyFile = keyFile
 	}
 	l.volumes[v.Name] = v
@@ -260,39 +270,47 @@ func (l *lvmDriver) Mount(req volume.MountRequest) volume.Response {
 		return resp(err)
 	}
 
-	v, exists := l.volumes[req.Name]
-	if !exists {
-		return resp(fmt.Errorf("No such volume"))
-	}
-
-	isSnap := func() bool {
-		if v.Type == "Snapshot" {
-			return true
+	isSnap, hasKeyFile := func() (bool, bool) {
+		if v, ok := l.volumes[req.Name]; ok {
+			return v.Type == "Snapshot", v.KeyFile != ""
 		}
-		return false
+		return false, false
 	}()
 
 	if l.count[req.Name] == 1 {
-		lvDevice := fmt.Sprintf("/dev/%s/%s", vgName, req.Name)
-		fsDevice := lvDevice
+		device := logicalDevice(vgName, req.Name)
 
-		if v.KeyFile != null {
-			cmd := exec.Command("cryptsetup", "-d", v.KeyFile, "luksOpen", lvDevice, fmt.Sprintf("luks-%s", req.Name))
-			if out, err := cmd.CombinedOutput(); err != nil {
+		if hasKeyFile {
+			if err := keyFileExists(keyFile) {
+				l.logger.Err(fmtSprintf("Mount: %s", err))
+				return resp(err)
+			}
+			if err := cryptsetupInstalled() {
+				l.logger.Err(fmtSprintf("Mount: %s", err))
+				return resp(err)
+			}
+			if out, err := luksOpen(vgName, req.Name, v.KeyFile); err != nil {
 				l.logger.Err(fmt.Sprintf("Mount: cryptsetup error: %s output %s", err, string(out)))
 				return resp(fmt.Errorf("Error opening encrypted volume"))
 			}
-			fsDevice = fmt.Sprintf("/dev/mapper/luks-%s", req.Name)
+			defer func() {
+				if err != nil {
+					if out, err = luksClose(req.Name); err != nil {
+						l.logger.Err(fmt.Sprintf("Mount: cryptsetup error: %s output %s", err, string(out)))
+					}
+				}
+			}()
+			device = luksDevice(req.Name)
 		}
 
-		mountArgs := []string{fsDevice, getMountpoint(l.home, req.Name)}
+		mountArgs := []string{device, getMountpoint(l.home, req.Name)}
 		if isSnap {
 			mountArgs = append([]string{"-o", "nouuid"}, mountArgs...)
 		}
 		cmd := exec.Command("mount", mountArgs...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			l.logger.Err(fmt.Sprintf("Mount: mount error: %s output %s", err, string(out)))
-			return resp(fmt.Errorf("error mouting volume"))
+			return resp(fmt.Errorf("Error mouting volume"))
 		}
 	}
 	if err := saveToDisk(l.volumes, l.count); err != nil {
@@ -311,13 +329,12 @@ func (l *lvmDriver) Unmount(req volume.UnmountRequest) volume.Response {
 			l.logger.Err(fmt.Sprintf("Unmount: unmount error: %s output %s", err, string(out)))
 			return resp(fmt.Errorf("error unmounting volume"))
 		}
-		v, exists := l.volumes[req.Name]
-		if !exists {
-			return resp(fmt.Errorf("No such volume"))
-		}
-		if v.KeyFile != null {
-			cmd = exec.Command("cryptsetup", "luksClose", fmt.Sprintf("luks-%s", req.Name))
-			if out, err := cmd.CombinedOutput(); err != nil {
+		if v, ok := l.volumes[req.Name]; ok && v.KeyFile != "" {
+			if err := cryptsetupInstalled() {
+				l.logger.Err(fmtSprintf("Unmount: %s", err))
+				return resp(err)
+			}
+			if out, err := luksClose(req.Name); err != nil {
 				l.logger.Err(fmt.Sprintf("Unmount: cryptsetup error: %s output %s", err, string(out)))
 				return resp(fmt.Errorf("Error closing encrypted volume"))
 			}
@@ -344,4 +361,20 @@ func resp(r interface{}) volume.Response {
 	default:
 		return volume.Response{Err: "bad value writing response"}
 	}
+}
+
+func luksOpen(vgName, volName, keyFile string) ([]byte, error){
+	cmd = exec.Command("cryptsetup", "-d", keyFile, "luksOpen", logicalDevice(vgName, volName), luksDeviceName(volName))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return out, err
+	}
+	return nil, nil
+}
+
+func luksClose(volName string) ([]byte, error){
+	cmd = exec.Command("cryptsetup", "luksClose", luksDeviceName(volName))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return out, err
+	}
+	return nil, nil
 }
